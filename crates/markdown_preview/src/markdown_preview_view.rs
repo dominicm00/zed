@@ -6,14 +6,14 @@ use anyhow::Result;
 use editor::scroll::Autoscroll;
 use editor::{Editor, EditorEvent};
 use gpui::{
-    App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ListState, ParentElement, Render, RetainAllImageCache, Styled, Subscription, Task,
-    WeakEntity, Window, list,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, ListState, MouseButton, ParentElement, Render,
+    RetainAllImageCache, Stateful, Styled, Subscription, Task, WeakEntity, Window, list,
 };
 use language::LanguageRegistry;
 use settings::Settings;
 use theme::ThemeSettings;
-use ui::prelude::*;
+use ui::{Scrollbar, ScrollbarState, prelude::*};
 use workspace::item::{Item, ItemHandle};
 use workspace::{Pane, Workspace};
 
@@ -36,6 +36,9 @@ pub struct MarkdownPreviewView {
     contents: Option<ParsedMarkdown>,
     selected_block: usize,
     list_state: ListState,
+    scrollbar_state: ScrollbarState,
+    show_scrollbar: bool,
+    hide_scrollbar_task: Option<Task<Result<()>>>,
     tab_content_text: Option<SharedString>,
     language_registry: Arc<LanguageRegistry>,
     parsing_markdown_task: Option<Task<Result<()>>>,
@@ -261,7 +264,10 @@ impl MarkdownPreviewView {
                 focus_handle: cx.focus_handle(),
                 workspace: workspace.clone(),
                 contents: None,
-                list_state,
+                list_state: list_state.clone(),
+                scrollbar_state: ScrollbarState::new(list_state),
+                show_scrollbar: false,
+                hide_scrollbar_task: None,
                 tab_content_text,
                 language_registry,
                 parsing_markdown_task: None,
@@ -475,6 +481,60 @@ impl MarkdownPreviewView {
     ) -> bool {
         !(current_block.is_list_item() && next_block.map(|b| b.is_list_item()).unwrap_or(false))
     }
+
+    fn render_vertical_scrollbar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if !self.show_scrollbar && !self.scrollbar_state.is_dragging() {
+            return None;
+        }
+
+        Some(
+            div()
+                .occlude()
+                .id("active-thread-scrollbar")
+                .on_mouse_move(cx.listener(|_, _, _, cx| {
+                    cx.notify();
+                    cx.stop_propagation()
+                }))
+                .on_hover(|_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_any_mouse_down(|_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                    cx.notify();
+                }))
+                .h_full()
+                .absolute()
+                .right_1()
+                .top_1()
+                .bottom_0()
+                .w(px(12.))
+                .cursor_default()
+                .children(Scrollbar::vertical(self.scrollbar_state.clone())),
+        )
+    }
+
+    fn hide_scrollbar_later(&mut self, cx: &mut Context<Self>) {
+        const SCROLLBAR_SHOW_INTERVAL: Duration = Duration::from_secs(1);
+        self.hide_scrollbar_task = Some(cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(SCROLLBAR_SHOW_INTERVAL)
+                .await;
+            view.update(cx, |view, cx| {
+                if !view.scrollbar_state.is_dragging() {
+                    view.show_scrollbar = false;
+                    cx.notify();
+                }
+            })
+        }));
+    }
 }
 
 impl Focusable for MarkdownPreviewView {
@@ -519,14 +579,34 @@ impl Render for MarkdownPreviewView {
             .key_context("MarkdownPreview")
             .track_focus(&self.focus_handle(cx))
             .size_full()
+            .relative()
             .bg(cx.theme().colors().editor_background)
             .p_4()
             .text_size(buffer_size)
             .line_height(relative(buffer_line_height.value()))
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                this.show_scrollbar = true;
+                this.hide_scrollbar_later(cx);
+                cx.notify();
+            }))
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                this.show_scrollbar = true;
+                this.hide_scrollbar_later(cx);
+                cx.notify();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.hide_scrollbar_later(cx);
+                }),
+            )
             .child(
                 div()
                     .flex_grow()
                     .map(|this| this.child(list(self.list_state.clone()).size_full())),
             )
+            .when_some(self.render_vertical_scrollbar(cx), |this, scrollbar| {
+                this.child(scrollbar)
+            })
     }
 }
