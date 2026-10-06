@@ -51,8 +51,8 @@ use crate::{
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
     NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, RenameSelectedThread,
-    ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
-    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
+    ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, RestartAgent,
+    ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
@@ -420,6 +420,16 @@ pub fn init(cx: &mut App) {
                             let agent = AgentId::new(action.agent.clone()).into();
                             panel.select_agent(agent, window, cx);
                         });
+                    }
+                })
+                .register_action(|workspace, _: &RestartAgent, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        let conversation_view = panel.read(cx).active_conversation_view().cloned();
+                        if let Some(conversation_view) = conversation_view {
+                            conversation_view.update(cx, |conversation_view, cx| {
+                                conversation_view.retry_connection(window, cx);
+                            });
+                        }
                     }
                 })
                 .register_action(|workspace, action: &ManageSkills, window, cx| {
@@ -5843,15 +5853,8 @@ impl AgentPanel {
                             menu = menu.action("Log Out", Box::new(LogoutAgent))
                         }
 
-                        if let Some(conversation_view) = conversation_view.as_ref() {
-                            menu = menu.entry("Reload Agent", None, {
-                                let conversation_view = conversation_view.clone();
-                                move |window, cx| {
-                                    conversation_view.update(cx, |conversation_view, cx| {
-                                        conversation_view.retry_connection(window, cx);
-                                    });
-                                }
-                            });
+                        if conversation_view.is_some() {
+                            menu = menu.action("Restart Agent", Box::new(RestartAgent));
                         }
 
                         menu
@@ -9795,6 +9798,51 @@ mod tests {
         // Lines are 1-based and inclusive; the path is presented as
         // `<rel-path>:<start>-<end>`, with a trailing space.
         assert_eq!(pasted, "file.rs:2-3 ");
+    }
+
+    #[gpui::test]
+    async fn test_restart_agent_reconnects_and_preserves_session(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_visible_panel(cx).await;
+        let connection = StubAgentConnection::new().with_supports_load_session(true);
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("Response after restart".into()),
+        )]);
+        open_thread_with_connection(&panel, connection, &mut cx);
+        let session_id = active_session_id(&panel, &cx);
+        let (conversation_view, connection_entry) = panel.read_with(&cx, |panel, cx| {
+            let view = panel.active_conversation_view().unwrap();
+            let entry = panel
+                .connection_store
+                .read(cx)
+                .entry(view.read(cx).agent_key())
+                .unwrap();
+            (view.clone(), entry.clone())
+        });
+
+        cx.dispatch_action(RestartAgent);
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.active_conversation_view(), Some(&conversation_view));
+            let new_entry = panel
+                .connection_store
+                .read(cx)
+                .entry(conversation_view.read(cx).agent_key())
+                .unwrap();
+            assert_ne!(new_entry, &connection_entry);
+            assert_eq!(
+                new_entry.read(cx).status(),
+                crate::agent_connection_store::AgentConnectionStatus::Connected,
+            );
+        });
+        assert_eq!(active_session_id(&panel, &cx), session_id);
+        send_message(&panel, &mut cx);
+        panel.read_with(&cx, |panel, cx| {
+            let thread_view = panel.active_thread_view(cx).unwrap();
+            let thread_view = thread_view.read(cx);
+            assert!(thread_view.thread_error.is_none());
+            assert_eq!(thread_view.thread.read(cx).status(), ThreadStatus::Idle);
+        });
     }
 
     async fn setup_panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, VisualTestContext) {

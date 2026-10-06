@@ -246,6 +246,8 @@ actions!(
         FocusRight,
         /// Opens the active thread as a markdown file.
         OpenActiveThreadAsMarkdown,
+        /// Restarts the active agent connection and reloads its thread.
+        RestartAgent,
         /// Opens the agent diff view to review changes.
         OpenAgentDiff,
         /// Copies the current thread to the clipboard as JSON for debugging.
